@@ -1,0 +1,170 @@
+#!/usr/bin/env ruby
+
+# Put the rubber to the road and find out what 
+# users REALLY have sudo using sudo -l -U and getpwent. 
+
+USAGE = <<EOF
+
+sudo_audit iterates through getpwent to determine the sudo privs for 
+all valid users of the system. It runs sudo -ll -U user for all users
+with a shell entry matching one in /etc/shells. 
+
+--help (-h)   Print this message. 
+
+--sudo (-s) <path to sudo executable> , default is /usr/bin/sudo. 
+
+Examples
+
+sudo_audit --sudo /bin/sudo 
+
+EOF
+
+$SUDO = '/usr/bin/sudo' ; 
+
+class SudoProc
+	def initialize(sudo_path)
+		@sudo_path = sudo_path
+		@flags = ['Sudoers entry:','RunAsUsers:','Commands:']
+	end
+	
+	def check(uname)
+		cmd = sprintf('%s -ll -U %s',@sudo_path,uname)
+		parse(`#{cmd}`)
+	end 
+
+
+	# If we find this return values. All else nil
+	# Sudoers entry:
+    #  RunAsUsers: root
+    #  Commands:
+	#    ALL
+	def parse(output)
+		return nil unless( output ) 
+		@answer = Hash.new
+		entries = output.split(@flags[0])
+	    return nil unless ( entries[1] )
+	    entries.shift
+	    entries.each do |entry|
+			parse_entry(entry)
+		end 
+		stringify 
+	end 
+
+	# Can be many of the above entries. 
+	def parse_entry(entry)
+		subentries = entry.split(@flags[1])
+		subentries.shift
+		subentries.each do |subent|
+			parse_subentry(subent)
+		end 
+	end 
+
+	def parse_subentry(subent)
+		parts = subent.split(@flags[2])
+		euser = parts[0].strip
+		@answer[euser] ||= Array.new
+		cmds = parse_cmds(parts[1])
+		@answer[euser].concat cmds 
+	end 
+
+	def parse_cmds(line)
+		line.strip
+		line.delete(' ')
+		line.split(',').map { |c| c.strip }
+	end 
+
+	def stringify
+		@answer.map { |user,cmds| "#{user} #{cmds.to_s}"}.join(" ") 
+	end
+	
+end
+
+class SudoWrangler
+
+	attr_reader :sudoers 
+
+	def initialize(sudo_path)
+		@sudo = SudoProc.new(sudo_path)
+		@sudoers = Hash.new
+		@good_shells = get_shells
+	end
+
+	def is_valid?(pw_entry)
+		@good_shells.include?(pw_entry.shell) 
+	end
+
+	def check_sudo(pw_entry)
+		if ( is_valid?(pw_entry))
+			add_entry(@sudo.check(pw_entry.name),pw_entry.name)
+		end
+	end 
+
+	def add_entry(sudo_cmds,name)
+		if ( sudo_cmds )
+			@sudoers[name] = sudo_cmds
+		end
+	end
+
+	def get_shells
+		@good_shells = IO.readlines('/etc/shells').map { |line| line.chomp!}  
+	end 
+	
+end
+
+require 'getoptlong' 
+
+opts = GetoptLong.new( 
+     [ "--help", "-h" , GetoptLong::NO_ARGUMENT],
+     [ "--debug", "-d", GetoptLong::NO_ARGUMENT],
+     ["--sudo", '-s', GetoptLong::REQUIRED_ARGUMENT ]
+)
+
+begin 
+  opts.each do |opt, arg| 
+    case opt
+    when "--help" 
+      print USAGE
+      exit      
+    when "--debug" 
+      $DEBUG = true
+    when '--sudo'
+      $SUDO = arg
+    end
+  end
+
+  unless ( File.executable?($SUDO)) 
+	if ( File.executable?('/var/adm/Sudo/sudo')) 
+		$SUDO = '/var/adm/Sudo/sudo' 
+	else 
+		raise "No sudo found"	
+	end
+end
+
+rescue => err
+    print "#{err.to_s}\n #{USAGE}" 
+    exit
+end 
+
+wrangler = SudoWrangler.new($SUDO)
+
+require 'etc'
+
+# Each entry is returned as a Struct::Passwd:
+# Passwd#name contains the short login name of the user as a String.
+# Passwd#passwd contains the encrypted password of the user as a String. 
+# 	an ‘x’ is returned if shadow passwords are in use. 
+#   An ‘*’ is returned if the user cannot log in using a password.
+# Passwd#uid contains the integer user ID (uid) of the user.
+# Passwd#gid contains the integer group ID (gid) of the user’s primary group.
+# Passwd#gecos contains a longer String description of the user, such as a full name. 
+#	Some Unix systems provide structured information in the gecos field, but this is system-dependent.
+# Passwd#dir contains the path to the home directory of the user as a String.
+# Passwd#shell contains the path to the login shell of the user as a String.
+
+Etc.passwd do |pw|
+	wrangler.check_sudo(pw)
+end
+
+wrangler.sudoers.each_key.sort.each do |user|
+	puts user + " : " + wrangler.sudoers[user]
+end 
