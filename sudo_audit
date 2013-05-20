@@ -21,6 +21,19 @@ EOF
 
 $SUDO = '/usr/bin/sudo' ; 
 
+# If Ruby version less than 1.9, monkey patch Array.to_s
+# 
+
+if ( RUBY_VERSION =~ /^1\.8/ )
+
+	class Array
+		def to_s
+			self.inspect
+	    end 
+	end 
+end 
+
+# Run sudo command and parse results
 class SudoProc
 	def initialize(sudo_path)
 		@sudo_path = sudo_path
@@ -68,17 +81,22 @@ class SudoProc
 	end 
 
 	def parse_cmds(line)
-		line.strip
-		line.delete(' ')
-		line.split(',').map { |c| c.strip }
+		line.strip!
+		line.delete!(' ')
+		# Rhel 5 sudo has odd bug where prints commands twice in pipe, but not to tty. 
+		# replace internal newlines with commas. 
+		line.tr!("\n",',')
+		line.delete!("\t")
+		line.split(',').map { |cmd| cmd.strip }
 	end 
 
 	def stringify
-		@answer.map { |user,cmds| "#{user} #{cmds.to_s}"}.join(" ") 
+		@answer.map { |user,cmds| "#{user} #{cmds.uniq.to_s}"}.join(" ") 
 	end
 	
 end
 
+# Managing class for dealing with setting up sudo commands and collecting results. 
 class SudoWrangler
 
 	attr_reader :sudoers 
@@ -95,7 +113,8 @@ class SudoWrangler
 
 	def check_sudo(pw_entry)
 		if ( is_valid?(pw_entry))
-			add_entry(@sudo.check(pw_entry.name),pw_entry.name)
+			name = pw_entry.name
+			add_entry(@sudo.check(name),name)
 		end
 	end 
 
@@ -145,6 +164,11 @@ rescue => err
     exit
 end 
 
+# Trim PATH to bare minimun to avoid spurious warnings. 
+# 
+
+ENV['PATH'] = '/bin:/usr/bin:/usr/sbin' 
+
 wrangler = SudoWrangler.new($SUDO)
 
 require 'etc'
@@ -165,6 +189,6 @@ Etc.passwd do |pw|
 	wrangler.check_sudo(pw)
 end
 
-wrangler.sudoers.each_key.sort.each do |user|
+wrangler.sudoers.keys.sort.each do |user|
 	puts user + " : " + wrangler.sudoers[user]
 end 
